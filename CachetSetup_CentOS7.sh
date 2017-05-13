@@ -1,11 +1,11 @@
-#!/bin/sh
+#!/bin/bash
 (
 # This script was created to automate the procedure of configuring Cachet on a CentOS 7 x64 minimal install
 # Script created by Travis McDade on 11/20/2016
-# Last updated on: 12/4/2016
+# Last updated on: 05/13/2017
 # Make sure you've made the script executable to run it chmod +x scriptname.sh
 # Usage: ./scriptname.sh url
-# Usage Examples:
+# URL Examples:
 #	http://subdomain.domain.com	Configures the URL for your Cachet instance and specifies HTTP
 #	https://subdomain.domain.com	Configures the URL for your Cachet instance and specifies HTTPS
 
@@ -24,6 +24,11 @@ cachet_url=$(echo "$1" | awk -F '://' '{print $2}')
 if [ -z "$1" ]
   then echo "Required argument not supplied - exiting..."
   exit 1
+fi
+
+####GET EMAIL ADDRESS####
+if [ "$connection_method" = "https" ]; then
+  read -p "Please enter the email address to use for Let's Encrypt: " email_address
 fi
 
 ####RUN UPDATES AND INSTALL PACKAGES####
@@ -75,7 +80,6 @@ sed -i -e "s/http:\/\/localhost/$connection_method:\/\/$cachet_url/g" .env
 sed -i -e "s/DB_USERNAME=homestead/DB_USERNAME=$cachet_db_username/g" .env
 sed -i -e "s/DB_PASSWORD=secret/DB_PASSWORD=$cachet_db_password/g" .env
 curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-#composer install --no-dev -o
 php /usr/local/bin/composer install --no-dev -o
 php artisan key:generate
 mysql --user=root --password="$mariadb_root_password" <<EOF
@@ -87,57 +91,71 @@ EOF
 php artisan app:install
 chmod -R 777 storage
 
+####DISABLE DEFAULT NGINX SERVER BLOCK####
+sed -i '38,57 s/^/#/' /etc/nginx/nginx.conf
+
 ####CERTIFICATE AND HTTPS NGINX CONFIGURATION####
 if [ "$connection_method" = "https" ]; then
 echo "Generating the SSL certificate and enabling HTTPS access for Cachet..."
-cat <<EOF /etc/nginx/default.d/le-well-known.conf
-location ~ /.well-known {
-        allow all;
-}
-EOF
-nginx -t
 systemctl stop nginx
-certbot certonly -a webroot --webroot-path=/var/www/Cachet/public -d "$cachet_url"
+certbot certonly -n --agree-tos --email "$email_address" --standalone -d "$cachet_url"
 ls -l /etc/letsencrypt/live/"$cachet_url"
 openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048
-cat <<EOF /etc/nginx/conf.d/ssl.conf
+sed "s/\${cachet_url}/$cachet_url/g" << 'EOF' > /etc/nginx/conf.d/ssl.conf
 server {
-        listen 443 ssl;
+    listen      443 default;
+    server_name ${cachet_url};
 
-        server_name $cachet_url;
+    ssl on;
+    ssl_certificate     /etc/letsencrypt/live/${cachet_url}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${cachet_url}/privkey.pem;
+    ssl_session_timeout 5m;
 
-        ssl_certificate /etc/letsencrypt/live/$cachet_url/fullchain.pem;
-        ssl_certificate_key /etc/letsencrypt/live/$cachet_url/privkey.pem;
+    ssl_ciphers               'AES128+EECDH:AES128+EDH:!aNULL';
+    ssl_protocols              TLSv1 TLSv1.1 TLSv1.2;
+    ssl_prefer_server_ciphers on;
 
-        ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
-        ssl_prefer_server_ciphers on;
-        ssl_dhparam /etc/ssl/certs/dhparam.pem;
-        ssl_ciphers 'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-DSS-AES128-GCM-SHA256:kEDH+AESGCM:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-AES256-SHA:DHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA:DHE-DSS-AES128-SHA256:DHE-RSA-AES256-SHA256:DHE-DSS-AES256-SHA:DHE-RSA-AES256-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:AES128-SHA:AES256-SHA:AES:CAMELLIA:DES-CBC3-SHA:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!aECDH:!EDH-DSS-DES-CBC3-SHA:!EDH-RSA-DES-CBC3-SHA:!KRB5-DES-CBC3-SHA';
-        ssl_session_timeout 1d;
-        ssl_session_cache shared:SSL:50m;
-        ssl_stapling on;
-        ssl_stapling_verify on;
-        add_header Strict-Transport-Security max-age=15768000;
+    root /var/www/Cachet/public;
 
-        location ~ /.well-known {
-                allow all;
-        }
+    index index.html index.htm index.php;
 
-        # The rest of your server block
-        root /var/www/Cachet/public;
-        index index.php;
+    charset utf-8;
 
-        location / {
-                # First attempt to serve request as file, then
-                # as directory, then fall back to displaying a 404.
-                try_files $uri $uri/ =404;
-                # Uncomment to enable naxsi on this location
-                # include /etc/nginx/naxsi.rules
-        }
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location = /favicon.ico { access_log off; log_not_found off; }
+    location = /robots.txt  { access_log off; log_not_found off; }
+
+    access_log  /var/log/nginx/cachet.access.log;
+    error_log   /var/log/nginx/cachet.error.log;
+
+    sendfile off;
+
+    location ~ \.php$ {
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_intercept_errors off;
+        fastcgi_buffer_size 16k;
+        fastcgi_buffers 4 16k;
+    }
+
+    location ~ /\.ht {
+        deny all;
+    }
 }
-EOF
-cat <<EOF /etc/nginx/default.d/ssl-redirect.conf
-return 301 https://$host$request_uri;
+
+server {
+    listen      80;
+    server_name ${cachet_url};
+
+    add_header Strict-Transport-Security max-age=2592000;
+    rewrite ^ https://$server_name$request_uri? permanent;
+}
 EOF
 nginx -t
 systemctl restart nginx
@@ -152,7 +170,8 @@ fi
 if [ "$connection_method" != "https" ]; then
 echo "Configuring NGINX..."
 chown -R apache:apache /var/www/Cachet/
-echo -e "server {
+sed "s/\${cachet_url}/$cachet_url/g" << 'EOF' > /etc/nginx/conf.d/cachet.conf
+server {
     listen 80;
     server_name ${cachet_url};
 
@@ -170,7 +189,8 @@ echo -e "server {
                 fastcgi_index index.php;
                 fastcgi_keep_conn on;
     }
-}" > /etc/nginx/conf.d/cachet.conf
+}
+EOF
 systemctl restart nginx
 systemctl restart php-fpm
 fi
