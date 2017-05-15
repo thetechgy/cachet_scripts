@@ -2,12 +2,12 @@
 (
 # This script was created to automate the procedure of configuring Cachet on a CentOS 7 x64 minimal install
 # Script created by Travis McDade on 11/20/2016
-# Last updated on: 05/13/2017
-# Make sure you've made the script executable to run it chmod +x scriptname.sh
-# Usage: ./scriptname.sh url
-# URL Examples:
-#	http://subdomain.domain.com	Configures the URL for your Cachet instance and specifies HTTP
-#	https://subdomain.domain.com	Configures the URL for your Cachet instance and specifies HTTPS
+# Last updated on: 05/14/2017
+# This script can be found at: https://github.com/thetechgy
+# Prior to running this script, you should do the OS setup basics - set the IP info, hostname, join a domain, configure selinux, configure the firewall, etc as it applies to your circumstances
+# Make sure you've made the script executable to run it by running chmod +x CachetSetup_CentOS7.sh
+# Note that the Lets Encrypt verification process will require that you allow HTTP and HTTPS traffic to the VM. You also need a public DNS entry for the status page URL that points back to your public IP
+# Usage: ./CachetSetup_CentOS7.sh
 
 ####PREP####
 echo "Preparing to configure CentOS 7 for Cachet..."
@@ -17,19 +17,11 @@ if [ "$EUID" -ne 0 ]
   exit 1
 fi
 
-####PARSE ARGUMENTS####
-cachet_full_url=$1
-connection_method=$(echo "$1" | awk -F '://' '{print $1}')
-cachet_url=$(echo "$1" | awk -F '://' '{print $2}')
-if [ -z "$1" ]
-  then echo "Required argument not supplied - exiting..."
-  exit 1
-fi
+####GET DESIRED URL####
+read -p "Please enter the desired URL for your status page (ex. subdomain.domain.com): " cachet_url
 
 ####GET EMAIL ADDRESS####
-if [ "$connection_method" = "https" ]; then
-  read -p "Please enter the email address to use for Let's Encrypt: " email_address
-fi
+read -p "Please enter the email address to use for Let's Encrypt: " email_address
 
 ####RUN UPDATES AND INSTALL PACKAGES####
 echo "Installing required repositories and packages..."
@@ -41,10 +33,7 @@ yum update -y
 sed -i '/\[remi\]/,/^ *\[/ s/enabled=0/enabled=1/' /etc/yum.repos.d/remi.repo
 sed -i '/\[remi-php56\]/,/^ *\[/ s/enabled=0/enabled=1/' /etc/yum.repos.d/remi.repo
 yum update -y
-yum install -y deltarpm php php-mysql php-mbstring php-gd php-cli php-process php-mcrypt php-mbstring php-common php-fpm php-xml php-opcache php-pecl-apcu php-pdo php-mysqlnd mariadb-server mariadb git curl nginx pwgen
-if [ "$connection_method" = "https" ]; then
-	yum install -y certbot
-fi
+yum install -y deltarpm php php-mysql php-mbstring php-gd php-cli php-process php-mcrypt php-common php-fpm php-xml php-opcache php-pecl-apcu php-pdo php-mysqlnd mariadb-server mariadb git curl nginx pwgen certbot
 
 ####DEFINE VARIABLES FOR LATER####
 mariadb_root_password=$(pwgen -N 1 -s 96)
@@ -76,7 +65,7 @@ cd Cachet/ || exit
 latest_git_tag=$(git tag -l | tail -n 1)
 git checkout "$latest_git_tag"
 cp .env.example .env
-sed -i -e "s/http:\/\/localhost/$connection_method:\/\/$cachet_url/g" .env
+sed -i -e "s/http:\/\/localhost/https:\/\/$cachet_url/g" .env
 sed -i -e "s/DB_USERNAME=homestead/DB_USERNAME=$cachet_db_username/g" .env
 sed -i -e "s/DB_PASSWORD=secret/DB_PASSWORD=$cachet_db_password/g" .env
 curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
@@ -95,7 +84,6 @@ chmod -R 777 storage
 sed -i '38,57 s/^/#/' /etc/nginx/nginx.conf
 
 ####CERTIFICATE AND HTTPS NGINX CONFIGURATION####
-if [ "$connection_method" = "https" ]; then
 echo "Generating the SSL certificate and enabling HTTPS access for Cachet..."
 systemctl stop nginx
 certbot certonly -n --agree-tos --email "$email_address" --standalone -d "$cachet_url"
@@ -103,7 +91,7 @@ ls -l /etc/letsencrypt/live/"$cachet_url"
 openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048
 sed "s/\${cachet_url}/$cachet_url/g" << 'EOF' > /etc/nginx/conf.d/ssl.conf
 server {
-    listen      443 default;
+    listen 443 default;
     server_name ${cachet_url};
 
     ssl on;
@@ -117,7 +105,7 @@ server {
 
     root /var/www/Cachet/public;
 
-    index index.html index.htm index.php;
+    index index.php;
 
     charset utf-8;
 
@@ -150,7 +138,7 @@ server {
 }
 
 server {
-    listen      80;
+    listen 80;
     server_name ${cachet_url};
 
     add_header Strict-Transport-Security max-age=2592000;
@@ -159,50 +147,16 @@ server {
 EOF
 nginx -t
 systemctl restart nginx
+systemctl restart php-fpm
 echo "Setting the SSL Certificate to auto-renew every Monday at 2:30AM and reload NGINX at 2:35AM..."
 crontab <<EOF
 30 2 * * 1 /usr/bin/certbot renew >> /var/log/le-renew.log
 35 2 * * 1 /usr/bin/systemctl reload nginx
 EOF
-fi
-
-####NGINX HTTP CONFIG####
-if [ "$connection_method" != "https" ]; then
-echo "Configuring NGINX..."
-chown -R apache:apache /var/www/Cachet/
-sed "s/\${cachet_url}/$cachet_url/g" << 'EOF' > /etc/nginx/conf.d/cachet.conf
-server {
-    listen 80;
-    server_name ${cachet_url};
-
-    root /var/www/Cachet/public;
-    index index.php;
-
-    location / {
-        try_files \$uri /index.php\$is_args\$args;
-    }
-
-    location ~ \.php$ {
-                include fastcgi_params;
-                fastcgi_pass 127.0.0.1:9000;
-                fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-                fastcgi_index index.php;
-                fastcgi_keep_conn on;
-    }
-}
-EOF
-systemctl restart nginx
-systemctl restart php-fpm
-fi
 
 ####FIREWALL CONFIGURATION####
-if [ "$connection_method" = "https" ]; then
 echo "Allowing HTTPS traffic through the firewall for the Public zone..."
 firewall-cmd --permanent --zone=public --add-service=https
-else
-echo "Allowing HTTP traffic through the firewall for the Public zone..."
-firewall-cmd --permanent --zone=public --add-service=http
-fi
 firewall-cmd --reload
 
 ####CLEANUP####
