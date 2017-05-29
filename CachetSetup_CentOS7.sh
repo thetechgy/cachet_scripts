@@ -145,7 +145,7 @@ server {
     rewrite ^ https://$server_name$request_uri? permanent;
 }
 EOF
-chown -R nginx:nginx /var/www/Cachet/
+chown -R apache:apache /var/www/Cachet/
 nginx -t
 systemctl restart nginx
 systemctl restart php-fpm
