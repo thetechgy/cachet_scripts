@@ -2,7 +2,7 @@
 (
 # This script was created to automate the procedure of configuring Cachet on a CentOS 7 x64 minimal install
 # Script created by Travis McDade on 11/20/2016
-# Last updated on: 05/14/2017
+# Last updated on: 05/29/2017
 # This script can be found at: https://github.com/thetechgy
 # Prior to running this script, you should do the OS setup basics - set the IP info, hostname, join a domain, configure selinux, configure the firewall, etc as it applies to your circumstances
 # Make sure you've made the script executable to run it by running chmod +x CachetSetup_CentOS7.sh
@@ -145,6 +145,7 @@ server {
     rewrite ^ https://$server_name$request_uri? permanent;
 }
 EOF
+chown -R nginx:nginx /var/www/Cachet/
 nginx -t
 systemctl restart nginx
 systemctl restart php-fpm
