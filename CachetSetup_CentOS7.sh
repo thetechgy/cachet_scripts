@@ -62,7 +62,7 @@ echo "Downloading and configuring Cachet..."
 cd /var/www/ || exit
 git clone https://github.com/cachethq/Cachet.git
 cd Cachet/ || exit
-latest_git_tag=$(git tag -l | tail -n 1)
+latest_git_tag=$(git tag | sort -r --version-sort | head -n1)
 git checkout "$latest_git_tag"
 cp .env.example .env
 sed -i -e "s/http:\/\/localhost/https:\/\/$cachet_url/g" .env
